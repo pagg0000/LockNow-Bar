@@ -1,0 +1,344 @@
+name: Build APK
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate project files
+        run: |
+          mkdir -p app/src/main/java/com/example/locknowbar
+
+          cat > .gitignore << 'EOF'
+          build/
+          .gradle/
+          *.apk
+          EOF
+
+          cat > settings.gradle.kts << 'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "LockNowBar"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts << 'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
+          }
+          EOF
+
+          cat > gradle.properties << 'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx3g
+          EOF
+
+          cat > app/build.gradle.kts << 'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+
+          android {
+              namespace = "com.example.locknowbar"
+              compileSdk = 35
+              defaultConfig {
+                  applicationId = "com.example.locknowbar"
+                  minSdk = 29
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { compose = true }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.activity:activity-compose:1.9.3")
+              implementation(platform("androidx.compose:compose-bom:2024.10.01"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.material3:material3")
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+
+              <application
+                  android:label="Lock NowBar"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+
+                  <activity
+                      android:name=".LockActivity"
+                      android:exported="false"
+                      android:showWhenLocked="true"
+                      android:turnScreenOn="true"
+                      android:launchMode="singleTop"
+                      android:excludeFromRecents="true"/>
+
+                  <service
+                      android:name=".NotifListener"
+                      android:exported="true"
+                      android:label="Lock NowBar"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService"/>
+                      </intent-filter>
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/example/locknowbar/Notif.kt << 'EOF'
+          package com.example.locknowbar
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.content.Context
+          import android.content.Intent
+          import android.service.notification.NotificationListenerService
+          import android.service.notification.StatusBarNotification
+          import androidx.compose.runtime.mutableStateListOf
+          import androidx.core.app.NotificationCompat
+
+          data class Notif(val key: String, val app: String, val title: String, val text: String)
+
+          object NotifStore {
+              val items = mutableStateListOf<Notif>()
+              fun add(n: Notif) {
+                  items.removeAll { it.key == n.key }
+                  items.add(0, n)
+                  if (items.size > 10) items.removeAt(items.lastIndex)
+              }
+          }
+
+          class NotifListener : NotificationListenerService() {
+
+              override fun onNotificationPosted(sbn: StatusBarNotification) {
+                  if (sbn.packageName == packageName) return
+                  val n = sbn.notification
+                  if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
+                  if (n.flags and Notification.FLAG_ONGOING_EVENT != 0) return
+
+                  val title = n.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
+                  val text = n.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
+                  if (title.isEmpty() && text.isEmpty()) return
+
+                  val app = try {
+                      packageManager.getApplicationLabel(
+                          packageManager.getApplicationInfo(sbn.packageName, 0)
+                      ).toString()
+                  } catch (e: Exception) {
+                      sbn.packageName
+                  }
+
+                  NotifStore.add(Notif(sbn.key, app, title, text))
+                  showOnLockScreen(app, title)
+              }
+
+              override fun onNotificationRemoved(sbn: StatusBarNotification) {
+                  NotifStore.items.removeAll { it.key == sbn.key }
+              }
+
+              private fun showOnLockScreen(app: String, title: String) {
+                  val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                  val channelId = "locknowbar"
+                  nm.createNotificationChannel(
+                      NotificationChannel(channelId, "Lock NowBar", NotificationManager.IMPORTANCE_HIGH)
+                  )
+                  val intent = Intent(this, LockActivity::class.java)
+                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                  val pi = PendingIntent.getActivity(
+                      this, 0, intent,
+                      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                  )
+                  val notif = NotificationCompat.Builder(this, channelId)
+                      .setSmallIcon(android.R.drawable.ic_dialog_info)
+                      .setContentTitle(app)
+                      .setContentText(title)
+                      .setPriority(NotificationCompat.PRIORITY_HIGH)
+                      .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                      .setAutoCancel(true)
+                      .setTimeoutAfter(8000)
+                      .setContentIntent(pi)
+                      .setFullScreenIntent(pi, true)
+                      .build()
+                  nm.notify(1, notif)
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/example/locknowbar/Main.kt << 'EOF'
+          package com.example.locknowbar
+
+          import android.Manifest
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.activity.enableEdgeToEdge
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.navigationBarsPadding
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.systemBarsPadding
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.Composable
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+
+          class MainActivity : ComponentActivity() {
+              private val askNotif =
+                  registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent {
+                      MaterialTheme {
+                          Column(
+                              Modifier.fillMaxSize().systemBarsPadding().padding(24.dp),
+                              verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
+                              horizontalAlignment = Alignment.CenterHorizontally
+                          ) {
+                              Text("Lock NowBar", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                              Button(onClick = {
+                                  startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                              }) { Text("1) السماح بقراءة الإشعارات") }
+                              Button(onClick = {
+                                  if (Build.VERSION.SDK_INT >= 33) {
+                                      askNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                  }
+                              }) { Text("2) السماح بإظهار الإشعارات") }
+                              Button(onClick = {
+                                  if (Build.VERSION.SDK_INT >= 34) {
+                                      startActivity(
+                                          Intent(
+                                              Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                                              Uri.parse("package:$packageName")
+                                          )
+                                      )
+                                  }
+                              }) { Text("3) السماح بالعرض فوق شاشة القفل") }
+                              Button(onClick = {
+                                  NotifStore.add(Notif("test", "تجربة", "مرحباً", "هذا إشعار تجريبي"))
+                                  startActivity(Intent(this@MainActivity, LockActivity::class.java))
+                              }) { Text("4) تجربة") }
+                          }
+                      }
+                  }
+              }
+          }
+
+          class LockActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setShowWhenLocked(true)
+                  setTurnScreenOn(true)
+                  enableEdgeToEdge()
+                  setContent { LockScreen(onClose = { finish() }) }
+              }
+          }
+
+          @Composable
+          fun LockScreen(onClose: () -> Unit) {
+              Box(
+                  Modifier
+                      .fillMaxSize()
+                      .background(Brush.verticalGradient(listOf(Color(0xFF0F0F1A), Color(0xFF303164))))
+                      .clickable(onClick = onClose),
+                  contentAlignment = Alignment.BottomCenter
+              ) {
+                  Column(
+                      Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp),
+                      verticalArrangement = Arrangement.spacedBy(10.dp)
+                  ) {
+                      NotifStore.items.take(4).forEach { n ->
+                          Column(
+                              Modifier
+                                  .fillMaxWidth()
+                                  .background(Color(0xFF3D3E7A), RoundedCornerShape(32.dp))
+                                  .clickable { NotifStore.items.remove(n) }
+                                  .padding(horizontal = 22.dp, vertical = 14.dp)
+                          ) {
+                              Text(n.app, color = Color(0xFFB9BAFF), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                              Text(n.title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                              Text(n.text, color = Color.White, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+
+      - name: Build debug APK
+        run: gradle assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+
+      - name: Save project files to repo
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add -A
+          git commit -m "Add project files" || echo "nothing to commit"
+          git push || echo "push skipped"
