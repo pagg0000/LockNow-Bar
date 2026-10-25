@@ -4,5 +4,5 @@ pluginManagement {
 dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
-rootProject.name = "LockNowBar"
+rootProject.name = "NowBrief"
 include(":app")

@@ -1,11 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.READ_CALENDAR"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
 
     <application
-        android:label="Lock NowBar"
+        android:label="Now Brief"
+        android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
-
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
@@ -13,18 +14,10 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".LockActivity"
-            android:exported="false"
-            android:showWhenLocked="true"
-            android:turnScreenOn="true"
-            android:launchMode="singleTop"
-            android:excludeFromRecents="true"/>
-
         <service
             android:name=".NotifListener"
             android:exported="true"
-            android:label="Lock NowBar"
+            android:label="Now Brief"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService"/>
