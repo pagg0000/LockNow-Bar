@@ -13,7 +13,7 @@ jobs:
 
       - name: Generate project files
         run: |
-          mkdir -p app/src/main/java/com/example/locknowbar
+          mkdir -p app/src/main/java/com/example/nowbrief
 
           cat > .gitignore << 'EOF'
           build/
@@ -28,7 +28,7 @@ jobs:
           dependencyResolutionManagement {
               repositories { google(); mavenCentral() }
           }
-          rootProject.name = "LockNowBar"
+          rootProject.name = "NowBrief"
           include(":app")
           EOF
 
@@ -53,14 +53,14 @@ jobs:
           }
 
           android {
-              namespace = "com.example.locknowbar"
+              namespace = "com.example.nowbrief"
               compileSdk = 35
               defaultConfig {
-                  applicationId = "com.example.locknowbar"
+                  applicationId = "com.example.nowbrief"
                   minSdk = 29
                   targetSdk = 35
-                  versionCode = 1
-                  versionName = "1.0"
+                  versionCode = 2
+                  versionName = "1.1"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -82,13 +82,14 @@ jobs:
 
           cat > app/src/main/AndroidManifest.xml << 'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-              <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.READ_CALENDAR"/>
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
 
               <application
-                  android:label="Lock NowBar"
+                  android:label="Now Brief"
+                  android:supportsRtl="true"
                   android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
-
                   <activity android:name=".MainActivity" android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN"/>
@@ -96,18 +97,10 @@ jobs:
                       </intent-filter>
                   </activity>
 
-                  <activity
-                      android:name=".LockActivity"
-                      android:exported="false"
-                      android:showWhenLocked="true"
-                      android:turnScreenOn="true"
-                      android:launchMode="singleTop"
-                      android:excludeFromRecents="true"/>
-
                   <service
                       android:name=".NotifListener"
                       android:exported="true"
-                      android:label="Lock NowBar"
+                      android:label="Now Brief"
                       android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
                       <intent-filter>
                           <action android:name="android.service.notification.NotificationListenerService"/>
@@ -117,43 +110,50 @@ jobs:
           </manifest>
           EOF
 
-          cat > app/src/main/java/com/example/locknowbar/Notif.kt << 'EOF'
-          package com.example.locknowbar
+          cat > app/src/main/java/com/example/nowbrief/Notif.kt << 'EOF'
+          package com.example.nowbrief
 
           import android.app.Notification
-          import android.app.NotificationChannel
-          import android.app.NotificationManager
-          import android.app.PendingIntent
-          import android.content.Context
-          import android.content.Intent
           import android.service.notification.NotificationListenerService
           import android.service.notification.StatusBarNotification
           import androidx.compose.runtime.mutableStateListOf
-          import androidx.core.app.NotificationCompat
 
-          data class Notif(val key: String, val app: String, val title: String, val text: String)
+          data class Incoming(val key: String, val app: String, val title: String, val text: String)
 
           object NotifStore {
-              val items = mutableStateListOf<Notif>()
-              fun add(n: Notif) {
+              val items = mutableStateListOf<Incoming>()
+              fun put(n: Incoming) {
                   items.removeAll { it.key == n.key }
                   items.add(0, n)
-                  if (items.size > 10) items.removeAt(items.lastIndex)
+                  while (items.size > 20) items.removeAt(items.lastIndex)
               }
           }
 
           class NotifListener : NotificationListenerService() {
 
+              override fun onListenerConnected() {
+                  try {
+                      activeNotifications?.forEach { handle(it) }
+                  } catch (e: Exception) {
+                  }
+              }
+
               override fun onNotificationPosted(sbn: StatusBarNotification) {
+                  handle(sbn)
+              }
+
+              override fun onNotificationRemoved(sbn: StatusBarNotification) {
+                  NotifStore.items.removeAll { it.key == sbn.key }
+              }
+
+              private fun handle(sbn: StatusBarNotification) {
                   if (sbn.packageName == packageName) return
                   val n = sbn.notification
                   if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
                   if (n.flags and Notification.FLAG_ONGOING_EVENT != 0) return
-
                   val title = n.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
                   val text = n.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
                   if (title.isEmpty() && text.isEmpty()) return
-
                   val app = try {
                       packageManager.getApplicationLabel(
                           packageManager.getApplicationInfo(sbn.packageName, 0)
@@ -161,156 +161,552 @@ jobs:
                   } catch (e: Exception) {
                       sbn.packageName
                   }
-
-                  NotifStore.add(Notif(sbn.key, app, title, text))
-                  showOnLockScreen(app, title)
-              }
-
-              override fun onNotificationRemoved(sbn: StatusBarNotification) {
-                  NotifStore.items.removeAll { it.key == sbn.key }
-              }
-
-              private fun showOnLockScreen(app: String, title: String) {
-                  val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                  val channelId = "locknowbar"
-                  nm.createNotificationChannel(
-                      NotificationChannel(channelId, "Lock NowBar", NotificationManager.IMPORTANCE_HIGH)
-                  )
-                  val intent = Intent(this, LockActivity::class.java)
-                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                  val pi = PendingIntent.getActivity(
-                      this, 0, intent,
-                      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                  )
-                  val notif = NotificationCompat.Builder(this, channelId)
-                      .setSmallIcon(android.R.drawable.ic_dialog_info)
-                      .setContentTitle(app)
-                      .setContentText(title)
-                      .setPriority(NotificationCompat.PRIORITY_HIGH)
-                      .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-                      .setAutoCancel(true)
-                      .setTimeoutAfter(8000)
-                      .setContentIntent(pi)
-                      .setFullScreenIntent(pi, true)
-                      .build()
-                  nm.notify(1, notif)
+                  NotifStore.put(Incoming(sbn.key, app, title, text))
               }
           }
           EOF
 
-          cat > app/src/main/java/com/example/locknowbar/Main.kt << 'EOF'
-          package com.example.locknowbar
+          cat > app/src/main/java/com/example/nowbrief/Main.kt << 'EOF'
+          package com.example.nowbrief
 
           import android.Manifest
+          import android.content.ContentUris
+          import android.content.Context
           import android.content.Intent
-          import android.net.Uri
-          import android.os.Build
+          import android.content.IntentFilter
+          import android.content.pm.PackageManager
+          import android.location.LocationManager
+          import android.os.BatteryManager
           import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.CalendarContract
           import android.provider.Settings
           import androidx.activity.ComponentActivity
+          import androidx.activity.compose.rememberLauncherForActivityResult
           import androidx.activity.compose.setContent
           import androidx.activity.enableEdgeToEdge
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.compose.foundation.background
           import androidx.compose.foundation.clickable
-          import androidx.compose.foundation.layout.Arrangement
-          import androidx.compose.foundation.layout.Box
-          import androidx.compose.foundation.layout.Column
-          import androidx.compose.foundation.layout.fillMaxSize
-          import androidx.compose.foundation.layout.fillMaxWidth
-          import androidx.compose.foundation.layout.navigationBarsPadding
-          import androidx.compose.foundation.layout.padding
-          import androidx.compose.foundation.layout.systemBarsPadding
+          import androidx.compose.foundation.horizontalScroll
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.rememberScrollState
           import androidx.compose.foundation.shape.RoundedCornerShape
-          import androidx.compose.material3.Button
+          import androidx.compose.foundation.text.BasicTextField
+          import androidx.compose.foundation.verticalScroll
           import androidx.compose.material3.MaterialTheme
           import androidx.compose.material3.Text
-          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.*
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
           import androidx.compose.ui.graphics.Brush
           import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.SolidColor
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.TextStyle
           import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextAlign
           import androidx.compose.ui.text.style.TextOverflow
           import androidx.compose.ui.unit.dp
           import androidx.compose.ui.unit.sp
+          import androidx.core.app.NotificationManagerCompat
+          import androidx.core.content.ContextCompat
+          import org.json.JSONObject
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.text.SimpleDateFormat
+          import java.util.Calendar
+          import java.util.Date
+          import java.util.Locale
+          import java.util.TimeZone
+          import kotlin.math.roundToInt
 
-          class MainActivity : ComponentActivity() {
-              private val askNotif =
-                  registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+          val listenerEnabled = mutableStateOf(false)
 
-              override fun onCreate(savedInstanceState: Bundle?) {
-                  super.onCreate(savedInstanceState)
-                  setContent {
-                      MaterialTheme {
-                          Column(
-                              Modifier.fillMaxSize().systemBarsPadding().padding(24.dp),
-                              verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
-                              horizontalAlignment = Alignment.CenterHorizontally
-                          ) {
-                              Text("Lock NowBar", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                              Button(onClick = {
-                                  startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-                              }) { Text("1) السماح بقراءة الإشعارات") }
-                              Button(onClick = {
-                                  if (Build.VERSION.SDK_INT >= 33) {
-                                      askNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
-                                  }
-                              }) { Text("2) السماح بإظهار الإشعارات") }
-                              Button(onClick = {
-                                  if (Build.VERSION.SDK_INT >= 34) {
-                                      startActivity(
-                                          Intent(
-                                              Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
-                                              Uri.parse("package:$packageName")
-                                          )
-                                      )
-                                  }
-                              }) { Text("3) السماح بالعرض فوق شاشة القفل") }
-                              Button(onClick = {
-                                  NotifStore.add(Notif("test", "تجربة", "مرحباً", "هذا إشعار تجريبي"))
-                                  startActivity(Intent(this@MainActivity, LockActivity::class.java))
-                              }) { Text("4) تجربة") }
-                          }
+          data class Ev(val title: String, val begin: Long, val allDay: Boolean)
+
+          data class Match(
+              val home: String,
+              val away: String,
+              val homeScore: String?,
+              val awayScore: String?,
+              val key: String,
+              val whenText: String
+          )
+
+          fun loadEvents(ctx: Context): List<Ev> {
+              if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CALENDAR)
+                  != PackageManager.PERMISSION_GRANTED
+              ) return emptyList()
+              val c = Calendar.getInstance()
+              c.set(Calendar.HOUR_OF_DAY, 0)
+              c.set(Calendar.MINUTE, 0)
+              c.set(Calendar.SECOND, 0)
+              c.set(Calendar.MILLISECOND, 0)
+              val begin = c.timeInMillis
+              val end = begin + 24L * 60 * 60 * 1000
+              val uri = CalendarContract.Instances.CONTENT_URI.buildUpon()
+              ContentUris.appendId(uri, begin)
+              ContentUris.appendId(uri, end)
+              val out = mutableListOf<Ev>()
+              try {
+                  ctx.contentResolver.query(
+                      uri.build(),
+                      arrayOf(
+                          CalendarContract.Instances.TITLE,
+                          CalendarContract.Instances.BEGIN,
+                          CalendarContract.Instances.ALL_DAY
+                      ),
+                      null, null,
+                      CalendarContract.Instances.BEGIN + " ASC"
+                  )?.use { cur ->
+                      while (cur.moveToNext()) {
+                          out.add(Ev(cur.getString(0) ?: "", cur.getLong(1), cur.getInt(2) == 1))
                       }
                   }
+              } catch (e: Exception) {
+              }
+              return out
+          }
+
+          fun batteryInfo(ctx: Context): Pair<Int, Boolean> {
+              val i = ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+              val level = i?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+              val scale = i?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+              val status = i?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+              val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                  status == BatteryManager.BATTERY_STATUS_FULL
+              val pct = if (level >= 0 && scale > 0) level * 100 / scale else -1
+              return Pair(pct, charging)
+          }
+
+          fun weatherText(code: Int): String = when (code) {
+              0 -> "صافٍ"
+              1, 2 -> "غائم جزئياً"
+              3 -> "غائم"
+              45, 48 -> "ضباب"
+              in 51..57 -> "رذاذ"
+              in 61..67 -> "مطر"
+              in 71..77 -> "ثلج"
+              in 80..82 -> "زخات مطر"
+              in 95..99 -> "عاصفة رعدية"
+              else -> "—"
+          }
+
+          fun getJson(url: String): JSONObject {
+              val c = URL(url).openConnection() as HttpURLConnection
+              c.connectTimeout = 10000
+              c.readTimeout = 10000
+              return try {
+                  JSONObject(c.inputStream.bufferedReader().use { it.readText() })
+              } finally {
+                  c.disconnect()
               }
           }
 
-          class LockActivity : ComponentActivity() {
+          fun fetchWeather(ctx: Context, done: (String) -> Unit) {
+              Thread {
+                  val result = try {
+                      if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_COARSE_LOCATION)
+                          != PackageManager.PERMISSION_GRANTED
+                      ) {
+                          "اسمح بالموقع لعرض الطقس"
+                      } else {
+                          val lm = ctx.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+                          val loc = lm.getProviders(true)
+                              .mapNotNull { lm.getLastKnownLocation(it) }
+                              .maxByOrNull { it.time }
+                          if (loc == null) {
+                              "الموقع غير متاح بعد"
+                          } else {
+                              val j = getJson(
+                                  "https://api.open-meteo.com/v1/forecast?latitude=" + loc.latitude +
+                                      "&longitude=" + loc.longitude +
+                                      "&current=temperature_2m,weather_code"
+                              )
+                              val cur = j.getJSONObject("current")
+                              cur.getDouble("temperature_2m").roundToInt().toString() + "° — " +
+                                  weatherText(cur.getInt("weather_code"))
+                          }
+                      }
+                  } catch (e: Exception) {
+                      "تعذّر جلب الطقس"
+                  }
+                  Handler(Looper.getMainLooper()).post { done(result) }
+              }.start()
+          }
+
+          fun localTime(ts: String, date: String): String {
+              if (ts.length >= 19) {
+                  try {
+                      val p = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
+                      p.timeZone = TimeZone.getTimeZone("UTC")
+                      val d = p.parse(ts.substring(0, 19))
+                      if (d != null) {
+                          return SimpleDateFormat("d MMM  HH:mm", Locale.getDefault()).format(d)
+                      }
+                  } catch (e: Exception) {
+                  }
+              }
+              return date
+          }
+
+          fun strOrNull(o: JSONObject, name: String): String? =
+              if (o.isNull(name)) null else o.optString(name)
+
+          fun parseMatches(j: JSONObject): List<Match> {
+              val arr = j.optJSONArray("events") ?: return emptyList()
+              val out = mutableListOf<Match>()
+              for (i in 0 until arr.length()) {
+                  val o = arr.getJSONObject(i)
+                  val ts = strOrNull(o, "strTimestamp") ?: ""
+                  val date = strOrNull(o, "dateEvent") ?: ""
+                  out.add(
+                      Match(
+                          home = strOrNull(o, "strHomeTeam") ?: "",
+                          away = strOrNull(o, "strAwayTeam") ?: "",
+                          homeScore = strOrNull(o, "intHomeScore"),
+                          awayScore = strOrNull(o, "intAwayScore"),
+                          key = if (ts.isNotEmpty()) ts else date,
+                          whenText = localTime(ts, date)
+                      )
+                  )
+              }
+              return out
+          }
+
+          fun fetchMatches(leagueId: String, done: (List<Match>, List<Match>, String?) -> Unit) {
+              Thread {
+                  var p: List<Match> = emptyList()
+                  var n: List<Match> = emptyList()
+                  var err: String? = null
+                  try {
+                      val base = "https://www.thesportsdb.com/api/v1/json/3/"
+                      p = parseMatches(getJson(base + "eventspastleague.php?id=" + leagueId))
+                          .sortedByDescending { it.key }.take(6)
+                      n = parseMatches(getJson(base + "eventsnextleague.php?id=" + leagueId))
+                          .sortedBy { it.key }.take(4)
+                      if (p.isEmpty() && n.isEmpty()) err = "لا توجد مباريات متاحة"
+                  } catch (e: Exception) {
+                      err = "تعذّر جلب المباريات"
+                  }
+                  val fp = p
+                  val fn = n
+                  val fe = err
+                  Handler(Looper.getMainLooper()).post { done(fp, fn, fe) }
+              }.start()
+          }
+
+          fun loadNotes(ctx: Context): List<String> {
+              val s = ctx.getSharedPreferences("brief", Context.MODE_PRIVATE).getString("notes", "") ?: ""
+              return s.split("\n").filter { it.isNotBlank() }
+          }
+
+          fun saveNotes(ctx: Context, list: List<String>) {
+              ctx.getSharedPreferences("brief", Context.MODE_PRIVATE)
+                  .edit().putString("notes", list.joinToString("\n")).apply()
+          }
+
+          class MainActivity : ComponentActivity() {
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  setShowWhenLocked(true)
-                  setTurnScreenOn(true)
                   enableEdgeToEdge()
-                  setContent { LockScreen(onClose = { finish() }) }
+                  setContent { MaterialTheme { BriefScreen() } }
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  listenerEnabled.value =
+                      NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)
               }
           }
 
           @Composable
-          fun LockScreen(onClose: () -> Unit) {
-              Box(
+          fun BriefCard(title: String, content: @Composable () -> Unit) {
+              Column(
                   Modifier
-                      .fillMaxSize()
-                      .background(Brush.verticalGradient(listOf(Color(0xFF0F0F1A), Color(0xFF303164))))
-                      .clickable(onClick = onClose),
-                  contentAlignment = Alignment.BottomCenter
+                      .fillMaxWidth()
+                      .background(Color(0x33FFFFFF), RoundedCornerShape(28.dp))
+                      .padding(18.dp),
+                  verticalArrangement = Arrangement.spacedBy(6.dp)
               ) {
+                  Text(title, color = Color(0xCCFFFFFF), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                  content()
+              }
+          }
+
+          @Composable
+          fun MatchRow(m: Match) {
+              val hs = m.homeScore
+              val aws = m.awayScore
+              val played = hs != null && aws != null
+              Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                  Text(
+                      m.home, color = Color.White, fontSize = 14.sp,
+                      textAlign = TextAlign.Center, modifier = Modifier.weight(1f)
+                  )
                   Column(
-                      Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp),
-                      verticalArrangement = Arrangement.spacedBy(10.dp)
+                      Modifier.weight(1.1f),
+                      horizontalAlignment = Alignment.CenterHorizontally
                   ) {
-                      NotifStore.items.take(4).forEach { n ->
-                          Column(
-                              Modifier
-                                  .fillMaxWidth()
-                                  .background(Color(0xFF3D3E7A), RoundedCornerShape(32.dp))
-                                  .clickable { NotifStore.items.remove(n) }
-                                  .padding(horizontal = 22.dp, vertical = 14.dp)
+                      if (played) {
+                          Text(
+                              hs + " - " + aws, color = Color.White,
+                              fontSize = 17.sp, fontWeight = FontWeight.Bold
+                          )
+                          Text(m.whenText, color = Color(0x99FFFFFF), fontSize = 11.sp)
+                      } else {
+                          Text(
+                              m.whenText, color = Color.White,
+                              fontSize = 13.sp, fontWeight = FontWeight.Bold
+                          )
+                      }
+                  }
+                  Text(
+                      m.away, color = Color.White, fontSize = 14.sp,
+                      textAlign = TextAlign.Center, modifier = Modifier.weight(1f)
+                  )
+              }
+          }
+
+          @Composable
+          fun BriefScreen() {
+              val ctx = LocalContext.current
+              var events by remember { mutableStateOf(loadEvents(ctx)) }
+              var weather by remember { mutableStateOf("جارٍ التحميل…") }
+              val battery = remember { batteryInfo(ctx) }
+              val notes = remember { mutableStateListOf<String>().apply { addAll(loadNotes(ctx)) } }
+              var draft by remember { mutableStateOf("") }
+
+              val leagues = listOf(
+                  "الإنجليزي" to "4328",
+                  "الإسباني" to "4335",
+                  "الإيطالي" to "4332",
+                  "الألماني" to "4331",
+                  "الفرنسي" to "4334",
+                  "أبطال أوروبا" to "4480",
+                  "السعودي" to "4668"
+              )
+              var leagueId by remember { mutableStateOf("4328") }
+              var past by remember { mutableStateOf<List<Match>>(emptyList()) }
+              var next by remember { mutableStateOf<List<Match>>(emptyList()) }
+              var footMsg by remember { mutableStateOf("جارٍ التحميل…") }
+              var tick by remember { mutableStateOf(0) }
+              val chips = rememberScrollState()
+              val listenerOn by listenerEnabled
+
+              val launcher = rememberLauncherForActivityResult(
+                  ActivityResultContracts.RequestMultiplePermissions()
+              ) {
+                  events = loadEvents(ctx)
+                  fetchWeather(ctx) { weather = it }
+              }
+              LaunchedEffect(Unit) {
+                  launcher.launch(
+                      arrayOf(
+                          Manifest.permission.READ_CALENDAR,
+                          Manifest.permission.ACCESS_COARSE_LOCATION
+                      )
+                  )
+              }
+              LaunchedEffect(leagueId, tick) {
+                  footMsg = "جارٍ التحميل…"
+                  fetchMatches(leagueId) { p, n, err ->
+                      past = p
+                      next = n
+                      footMsg = err ?: ""
+                  }
+              }
+
+              val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+              val title: String
+              val greet: String
+              val colors: List<Color>
+              when {
+                  hour in 5..11 -> {
+                      title = "ملخص الصباح"; greet = "صباح الخير"
+                      colors = listOf(Color(0xFF4FA3E0), Color(0xFF1B4F8A))
+                  }
+                  hour in 12..17 -> {
+                      title = "ملخص اليوم"; greet = "نهارك سعيد"
+                      colors = listOf(Color(0xFFE8943A), Color(0xFF7A3B6E))
+                  }
+                  else -> {
+                      title = "ملخص المساء"; greet = "مساء الخير"
+                      colors = listOf(Color(0xFF2B2B5E), Color(0xFF0A0A1A))
+                  }
+              }
+              val dateText = SimpleDateFormat("EEEE d MMMM", Locale.getDefault()).format(Date())
+              val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
+
+              Box(Modifier.fillMaxSize().background(Brush.verticalGradient(colors))) {
+                  Column(
+                      Modifier
+                          .fillMaxSize()
+                          .verticalScroll(rememberScrollState())
+                          .systemBarsPadding()
+                          .padding(18.dp),
+                      verticalArrangement = Arrangement.spacedBy(14.dp)
+                  ) {
+                      Text(title, color = Color(0xCCFFFFFF), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                      Text(greet, color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Bold)
+                      Text(dateText, color = Color(0xCCFFFFFF), fontSize = 16.sp)
+                      Text(
+                          "لديك " + events.size + " موعد اليوم",
+                          color = Color.White, fontSize = 16.sp
+                      )
+
+                      BriefCard("الطقس") {
+                          Text(weather, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                      }
+
+                      BriefCard("المواعيد") {
+                          if (events.isEmpty()) {
+                              Text("لا توجد مواعيد اليوم", color = Color.White, fontSize = 16.sp)
+                          } else {
+                              events.forEach { e ->
+                                  val t = if (e.allDay) "طوال اليوم" else timeFmt.format(Date(e.begin))
+                                  Text(t + "   " + e.title, color = Color.White, fontSize = 16.sp)
+                              }
+                          }
+                      }
+
+                      BriefCard("كرة القدم") {
+                          Row(
+                              Modifier.fillMaxWidth().horizontalScroll(chips),
+                              horizontalArrangement = Arrangement.spacedBy(8.dp)
                           ) {
-                              Text(n.app, color = Color(0xFFB9BAFF), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                              Text(n.title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                              Text(n.text, color = Color.White, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                              leagues.forEach { pair ->
+                                  val selected = pair.second == leagueId
+                                  Text(
+                                      pair.first, color = Color.White, fontSize = 14.sp,
+                                      modifier = Modifier
+                                          .background(
+                                              if (selected) Color(0x66FFFFFF) else Color(0x22FFFFFF),
+                                              RoundedCornerShape(16.dp)
+                                          )
+                                          .clickable { leagueId = pair.second }
+                                          .padding(horizontal = 12.dp, vertical = 6.dp)
+                                  )
+                              }
+                          }
+                          if (footMsg.isNotEmpty()) {
+                              Text(footMsg, color = Color(0xCCFFFFFF), fontSize = 14.sp)
+                          }
+                          if (past.isNotEmpty()) {
+                              Text("آخر النتائج", color = Color(0xCCFFFFFF), fontSize = 12.sp)
+                              past.forEach { MatchRow(it) }
+                          }
+                          if (next.isNotEmpty()) {
+                              Text("المباريات القادمة", color = Color(0xCCFFFFFF), fontSize = 12.sp)
+                              next.forEach { MatchRow(it) }
+                          }
+                          Text(
+                              "↻ تحديث", color = Color.White, fontSize = 13.sp,
+                              modifier = Modifier.clickable { tick++ }.padding(vertical = 4.dp)
+                          )
+                      }
+
+                      BriefCard("الإشعارات") {
+                          if (!listenerOn) {
+                              Text("فعّل الإذن لعرض إشعاراتك هنا", color = Color.White, fontSize = 15.sp)
+                              Text(
+                                  "تفعيل", color = Color.White, fontSize = 15.sp,
+                                  fontWeight = FontWeight.Bold,
+                                  modifier = Modifier
+                                      .background(Color(0x44FFFFFF), RoundedCornerShape(16.dp))
+                                      .clickable {
+                                          ctx.startActivity(
+                                              Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                                          )
+                                      }
+                                      .padding(horizontal = 16.dp, vertical = 8.dp)
+                              )
+                          } else if (NotifStore.items.isEmpty()) {
+                              Text("لا توجد إشعارات", color = Color.White, fontSize = 15.sp)
+                          } else {
+                              NotifStore.items.take(5).forEach { n ->
+                                  Column(
+                                      Modifier
+                                          .fillMaxWidth()
+                                          .clickable { NotifStore.items.remove(n) }
+                                          .padding(vertical = 4.dp)
+                                  ) {
+                                      Text(
+                                          n.app, color = Color(0xCCFFFFFF), fontSize = 11.sp,
+                                          fontWeight = FontWeight.SemiBold
+                                      )
+                                      Text(
+                                          n.title, color = Color.White, fontSize = 15.sp,
+                                          fontWeight = FontWeight.Bold, maxLines = 1,
+                                          overflow = TextOverflow.Ellipsis
+                                      )
+                                      Text(
+                                          n.text, color = Color.White, fontSize = 13.sp,
+                                          maxLines = 2, overflow = TextOverflow.Ellipsis
+                                      )
+                                  }
+                              }
+                          }
+                      }
+
+                      BriefCard("الهاتف") {
+                          val b = if (battery.first >= 0) battery.first.toString() + "%" else "—"
+                          val c = if (battery.second) "  (يشحن)" else ""
+                          Text("البطارية: " + b + c, color = Color.White, fontSize = 16.sp)
+                      }
+
+                      BriefCard("تذكيراتي") {
+                          notes.toList().forEach { n ->
+                              Row(
+                                  Modifier.fillMaxWidth(),
+                                  verticalAlignment = Alignment.CenterVertically
+                              ) {
+                                  Text(n, color = Color.White, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                                  Text(
+                                      "✓", color = Color.White, fontSize = 22.sp,
+                                      modifier = Modifier
+                                          .clickable {
+                                              notes.remove(n)
+                                              saveNotes(ctx, notes)
+                                          }
+                                          .padding(8.dp)
+                                  )
+                              }
+                          }
+                          Row(
+                              Modifier.fillMaxWidth(),
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              BasicTextField(
+                                  value = draft,
+                                  onValueChange = { draft = it.replace("\n", " ") },
+                                  singleLine = true,
+                                  textStyle = TextStyle(color = Color.White, fontSize = 16.sp),
+                                  cursorBrush = SolidColor(Color.White),
+                                  modifier = Modifier.weight(1f),
+                                  decorationBox = { inner ->
+                                      Box {
+                                          if (draft.isEmpty()) {
+                                              Text("أضف تذكيراً…", color = Color(0x99FFFFFF), fontSize = 16.sp)
+                                          }
+                                          inner()
+                                      }
+                                  }
+                              )
+                              Text(
+                                  "+", color = Color.White, fontSize = 26.sp,
+                                  modifier = Modifier
+                                      .clickable {
+                                          if (draft.isNotBlank()) {
+                                              notes.add(0, draft.trim())
+                                              saveNotes(ctx, notes)
+                                              draft = ""
+                                          }
+                                      }
+                                      .padding(8.dp)
+                              )
                           }
                       }
                   }
@@ -340,5 +736,5 @@ jobs:
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add -A
-          git commit -m "Add project files" || echo "nothing to commit"
+          git commit -m "Update project files" || echo "nothing to commit"
           git push || echo "push skipped"
